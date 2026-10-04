@@ -2,21 +2,22 @@
 # in the spinel lane's HTTP server count BYTES.
 #
 # Run under plain CRuby against the real servers over a scripted socket
-# (tests/tep_server_harness.rb), in its `utf8:` mode: recv'd chunks come
-# back tagged UTF-8, so `String#length` counts characters the way it does
-# on spinel. Under CRuby's own binary chunks `length` equals `bytesize`
-# and no char/byte confusion is visible at all.
+# (tests/tep_server_harness.rb), in its `utf8:` stress mode: recv'd
+# chunks come back tagged UTF-8, so `String#length` counts characters on
+# anything built from them. Under CRuby's binary chunks `length` equals
+# `bytesize` and no char/byte confusion is visible at all.
 #
 # Content-Length counts bytes. 5cb6d051 moved the two drains in
-# request.rb to `bytesize` — `raw_body.length` against a byte count had
-# cost spinel a 5s wait per multibyte body — but the blocking server's
-# drain is a third one, `Sock.sphttp_drain_body` in net.rb, and it still
-# compared `out.length` against the byte count it was handed. A body
-# carrying multibyte UTF-8 is fewer characters than bytes, so with every
-# byte in hand the loop asked the socket for more: on a keep-alive
-# connection it read the head of the NEXT pipelined request into this
-# request's body (and with nothing pipelined, its blocking recv parked
-# the worker until the client sent something or hung up).
+# request.rb to `bytesize` after `raw_body.length` against a byte count
+# cost spinel a 5s wait per multibyte body, but the blocking server's
+# drain, `Sock.sphttp_drain_body` in net.rb, still compared `out.length`
+# against the byte count it was handed. It measured correctly only
+# because `out = out + chunk` keeps recv'd bytes binary on spinel
+# (probed on 775ba5f68 — the same bytes appended with `<<` count
+# characters). Had `out` counted characters, a multibyte body would have
+# looked short with every byte in hand, and the loop would have read the
+# head of the NEXT pipelined request into this request's body. That is
+# the failure this stress mode reproduces and the fix rules out.
 
 require_relative "tep_server_harness"
 

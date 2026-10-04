@@ -1,24 +1,23 @@
 //! The request-body drains in the spinel lane's HTTP server count bytes.
 //!
 //! Content-Length counts bytes. 5cb6d051 moved request.rb's two drains to
-//! `bytesize` after `raw_body.length` against a byte count cost spinel a
-//! 5s wait per multibyte body, but the blocking server's drain,
-//! `Sock.sphttp_drain_body` in net.rb, still compared `out.length`. On
-//! spinel `length` counts characters on recv'd bytes, so a multibyte body
-//! looked short with every byte in hand and the drain read on: into the
-//! next pipelined request on a keep-alive connection, which then reached
-//! the app as the tail of this request's body.
+//! `bytesize`, but the blocking server's drain, `Sock.sphttp_drain_body`
+//! in net.rb, still compared `out.length`. It measured correctly only
+//! because `out = out + chunk` keeps recv'd bytes binary on spinel; the
+//! same bytes appended with `<<` count characters (probed on spinel
+//! 775ba5f68). Had `out` counted characters, a multibyte body would have
+//! looked short with every byte in hand and the drain would have read the
+//! next pipelined request into this request's body.
 //!
-//! The scaffold boots the threaded (default) or scheduled server, not the
-//! blocking one, so the shipped default never ran this drain. It still
-//! ships, and all three servers are checked here, the other two as
-//! regressions.
+//! Only the blocking `Tep::Server` calls this drain, and the scaffold
+//! boots the threaded (default) or scheduled server. All three servers
+//! are checked here, the other two as regressions.
 //!
 //! The driver (`tests/spinel_body_drain_bytes.rb`) runs the real servers
-//! under CRuby (`tests/tep_server_harness.rb`), handing recv'd chunks back
-//! tagged UTF-8 so `length` counts characters as it does on spinel. Under
-//! CRuby's binary chunks the confusion is invisible. Not compiled by
-//! spinel here.
+//! under CRuby (`tests/tep_server_harness.rb`) in a stress mode that hands
+//! recv'd chunks back tagged UTF-8, so `length` counts characters on
+//! anything built from them. Under CRuby's binary chunks the confusion is
+//! invisible.
 
 use std::path::Path;
 use std::process::Command;

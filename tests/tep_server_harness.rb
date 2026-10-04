@@ -43,11 +43,16 @@ end
 # pipelined request.
 #
 # `utf8: true` hands chunks back tagged UTF-8, so `String#length` counts
-# characters on what the server accumulates. That is spinel's behavior
-# on recv'd bytes, not CRuby's: a binary chunk makes CRuby's `length`
-# agree with `bytesize`, which hides every char/byte confusion. Recorded
-# by 5cb6d051, where `raw_body.length` against a byte count cost spinel
-# a 5s wait per multibyte body.
+# characters on whatever the server accumulates from them. That is a
+# STRESS model, not a claim about every recv'd String. Probed on spinel
+# 775ba5f68: bytes from `sp_net_recv_some(:binstr)` keep `length ==
+# bytesize` through `+`, character slicing and `byteslice`, as CRuby's
+# do, but appending them with `<<` onto `+""` yields a String whose
+# `length` counts characters (the threaded and scheduled header readers
+# build their blob that way, which is what 5cb6d051's `raw_body.length`
+# stall came from). A wire length compared against `length` is right
+# only while every String on the path happens to stay binary, and this
+# mode makes any such comparison visible.
 class Wire
   attr_reader :recvs, :out, :pos
 

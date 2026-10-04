@@ -77,13 +77,13 @@ module Sock
   # prefork server's consume_body, whose fd is blocking). `+` concat is
   # binary-safe.
   #
-  # bytesize throughout, never length: `n` is a byte count, and on spinel
-  # `length` counts characters on recv'd bytes. A multibyte body is fewer
-  # characters than bytes, so the old `out.length < n` kept asking for
-  # more with every byte already in hand — reading the next pipelined
-  # request into this one's body, or parking the worker in a blocking
-  # recv until the client sent something. 5cb6d051 fixed the same
-  # comparison in request.rb's two drains and missed this third one.
+  # bytesize throughout, never length: `n` is a byte count. The old
+  # `out.length < n` measured correctly only because `out + chunk` keeps
+  # recv'd bytes binary on spinel; build `out` with `<<` and `length`
+  # counts characters (probed on spinel 775ba5f68). Counting characters, a
+  # multibyte body looks short with every byte in hand, and the loop reads
+  # the next pipelined request into this one's body. 5cb6d051 fixed the
+  # same comparison in request.rb's two drains and missed this one.
   # Pinned by tests/spinel_body_drain_bytes.rb.
   def self.sphttp_drain_body(fd, n)
     out = +""
