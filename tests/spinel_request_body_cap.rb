@@ -92,18 +92,49 @@ if cap_env.empty?
     "the default cap is 100 MiB",
     Tep.respond_to?(:max_body_bytes) && Tep.max_body_bytes == 100 * 1024 * 1024
   )
+
+  # Leading zeros are not magnitude: Puma reads a zero-padded length as
+  # its value (`.to_i`), so 22 characters of "...0011" is eleven bytes,
+  # not a saturated "too large".
+  check(
+    "a zero-padded byte count reads as its value",
+    Tep.decimal_byte_count("0" * 20 + "11") == 11,
+    "got #{Tep.decimal_byte_count("0" * 20 + "11")}"
+  )
 else
-  cap = cap_env.to_i
+  # The harness says what cap the override must produce. Over-18-digit
+  # values used to saturate to the same 10^18 a huge Content-Length
+  # saturates to, so the override became that ceiling and an over-18-digit
+  # length compared EQUAL to it and passed: a zero-padded small value, or
+  # any absurd one, switched the cap off.
+  expect = Integer(ENV.fetch("EXPECT_CAP"))
+  check(
+    "TEP_MAX_BODY_BYTES=#{cap_env} makes the cap #{expect}",
+    Tep.max_body_bytes == expect,
+    "got #{Tep.max_body_bytes}"
+  )
+
   SERVERS.each_key do |s|
-    r = serve(s, post(cap, "a" * cap))
-    status, _recvs, bodies, raised = r
+    r = serve(s, post("9" * 25, "x"))
+    status, recvs, bodies, raised = r
     check(
-      "#{s}: a body exactly at TEP_MAX_BODY_BYTES is served",
-      raised.nil? && status == 200 && bodies.map(&:bytesize) == [cap],
+      "#{s}: under this override a 25-digit Content-Length is still a 413",
+      raised.nil? && status == 413 && recvs == 1 && bodies.empty?,
       describe(*r)
     )
 
-    r = serve(s, post(cap + 1, "a" * (cap + 1)))
+    # The boundary, where the cap is small enough to send.
+    next if expect > 1 << 20
+
+    r = serve(s, post(expect, "a" * expect))
+    status, _recvs, bodies, raised = r
+    check(
+      "#{s}: a body exactly at TEP_MAX_BODY_BYTES is served",
+      raised.nil? && status == 200 && bodies.map(&:bytesize) == [expect],
+      describe(*r)
+    )
+
+    r = serve(s, post(expect + 1, "a" * (expect + 1)))
     status, recvs, bodies, raised = r
     check(
       "#{s}: one byte over TEP_MAX_BODY_BYTES is a 413",
