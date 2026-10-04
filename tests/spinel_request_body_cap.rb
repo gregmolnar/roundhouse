@@ -1,11 +1,8 @@
 # Driver for tests/spinel_request_body_cap.rs — the request-body cap in
 # the spinel lane's HTTP server (`runtime/spinel/tep/`).
 #
-# Run under plain CRuby against the REAL servers: all three `handle_one`s
-# (threaded — the default —, fiber-scheduled, and blocking/prefork), the
-# real Parser/Request/Response, and the real `Sock.sphttp_*` wrappers in
-# net.rb. Only the sp_net primitives underneath are replaced, by a
-# scripted socket that records every recv the server asks for.
+# Run under plain CRuby against the real servers over a scripted socket
+# (tests/tep_server_harness.rb).
 #
 # Headers were capped (MAX_REQUEST_BYTES, 64 KiB) but the body was not:
 # `Request#content_length` was the header's bare `.to_i`, and every drain
@@ -20,145 +17,7 @@
 #     ruby tests/spinel_request_body_cap.rb            # default cap
 #     TEP_MAX_BODY_BYTES=1024 ruby tests/spinel_request_body_cap.rb
 
-# net.rb declares the sp_net primitives with spinel's `ffi_func`; under
-# CRuby that declaration is a no-op and the scripted socket below
-# supplies the primitives, so the Ruby wrappers above them run as shipped.
-class Module
-  def ffi_func(*); end
-end
-
-module Tep
-  # The fiber scheduler, reduced to "the fd is ready": the scheduled
-  # server and its body drain park on `io_wait`, and the scripted socket
-  # never blocks.
-  module Scheduler
-    READ = 1
-    WRITE = 2
-    def self.io_wait(_fd, _mode, _timeout)
-      1
-    end
-  end
-end
-
-# tep.rb's own order, less the two files stubbed here (scheduler, app)
-# and the ones only its load-time type seeding needs — that seeding
-# opens a stream, which is spinel's business, not this test's.
-%w[
-  tep_core url net streamer broadcast_subscription websocket
-  request response parser server server_threaded server_scheduled
-].each do |f|
-  require_relative "../runtime/spinel/tep/#{f}"
-end
-
-# One connection's bytes. `recv` serves at most a MiB per call (what a
-# socket would hand back in pieces), records each call, and answers ""
-# at the end — EOF.
-class Wire
-  attr_reader :recvs, :out
-
-  def initialize(bytes)
-    @bytes = bytes.b
-    @pos = 0
-    @recvs = 0
-    @out = +""
-  end
-
-  def recv(n)
-    @recvs += 1
-    take = [n, 1 << 20, @bytes.bytesize - @pos].min
-    take = 0 if take < 0
-    chunk = @bytes.byteslice(@pos, take)
-    @pos += take
-    chunk
-  end
-
-  def write(s)
-    @out << s.b
-    s.bytesize
-  end
-end
-
-module Sock
-  class << self
-    attr_accessor :wire
-  end
-
-  def self.sp_net_recv_some(_fd, n) = wire.recv(n)
-  def self.sp_net_write_str(_fd, s) = wire.write(s)
-  def self.sp_net_write_bytes(_fd, s, n) = wire.write(s.byteslice(0, n))
-  def self.sp_net_close(_fd) = 0
-end
-
-# What the threaded server waits on between recvs.
-class ReadyIO
-  def wait_readable(_t) = self
-end
-
-class RecordingApp
-  attr_reader :bodies
-
-  def initialize
-    @bodies = []
-  end
-
-  def reset
-    @bodies = []
-  end
-
-  def dispatch(req, res)
-    @bodies << req.raw_body.dup
-    res.status = 200
-    res.body = "ok"
-  end
-end
-
-APP = RecordingApp.new
-Tep.send(:remove_const, :APP) if Tep.const_defined?(:APP, false)
-Tep.const_set(:APP, APP)
-
-SERVERS = {
-  "threaded" => ->(fd) { Tep::Server::Threaded.handle_one(fd, ReadyIO.new) },
-  "scheduled" => ->(fd) { Tep::Server::Scheduled.handle_one(fd) },
-  "blocking" => ->(fd) { Tep::Server.new(APP).handle_one(fd) },
-}.freeze
-
-CHECKS = []
-
-def check(name, ok, detail = nil)
-  CHECKS << ok
-  puts "#{ok ? "ok" : "FAIL"} #{name}#{ok || detail.nil? ? "" : " — #{detail}"}"
-end
-
-def post(content_length, body)
-  head = +"POST /posts HTTP/1.1\r\nHost: localhost\r\n" \
-          "Content-Type: application/x-www-form-urlencoded\r\n"
-  head << "Content-Length: #{content_length}\r\n" unless content_length.nil?
-  head << "\r\n"
-  head + body
-end
-
-# One request through one server: what it wrote back, how many recvs it
-# made, and the bodies the app was dispatched with. A raise is a result
-# too — on the shipped server it escapes `handle_one`.
-def serve(server, bytes)
-  Sock.wire = Wire.new(bytes)
-  APP.reset
-  begin
-    SERVERS.fetch(server).call(7)
-    raised = nil
-  rescue StandardError => e
-    raised = e
-  end
-  status = Sock.wire.out[/\AHTTP\/1\.\d (\d{3})/, 1].to_i
-  [status, Sock.wire.recvs, APP.bodies, raised]
-end
-
-def describe(status, recvs, bodies, raised)
-  return "raised #{raised.class}: #{raised.message}" if raised
-
-  sizes = bodies.map(&:bytesize)
-  "answered #{status}, #{recvs} recv(s), app dispatched with body sizes #{sizes}"
-end
+require_relative "tep_server_harness"
 
 # The attacker's request: a 10 GiB declaration and 8 MiB actually sent,
 # which the unfixed drains read to EOF and handed to the app.
