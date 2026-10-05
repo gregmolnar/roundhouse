@@ -987,7 +987,16 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // to COUNT for strict targets; Relation.exists? forms moved to
     // connection.rb reopen. last_page? requires non-empty short page.
     // This probe sees the connection reopen's new self-sends.
-    const CEILING: usize = 1400;
+    // 2026-10-05 1400 -> 1411, +11, MEASURED against main 45ca74cb:
+    // only relation.rb, 922 -> 933 — the `limit`/`offset` casts and the
+    // three guards they and `order_term` call (`sql_limit`,
+    // `order_direction`, `order_hash_column`), whose parameters and
+    // self-sends this probe does not resolve from relation.rbs. The
+    // full-context gate in runtime_src_integration still has zero
+    // unresolved types. What it buys: request params reach LIMIT,
+    // OFFSET and an ORDER hash as values, never as SQL (emit_and_run's
+    // `query_params_are_values_not_sql`).
+    const CEILING: usize = 1411;
 
     assert!(
         all_untyped.len() <= CEILING,

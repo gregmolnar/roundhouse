@@ -5469,3 +5469,113 @@ fn a_hyphenated_view_directory_renders() {
         .run_test("test/controllers/articles_controller_test.rb")
         .assert_passes();
 }
+
+/// Request params reach `limit`, `offset` and an `order` hash as
+/// VALUES, never as SQL — Rails' own guards, measured against
+/// activerecord 8.1: `limit` goes through `Integer()` (an ArgumentError
+/// for anything that is not an integer), `offset` through `to_i`, and
+/// an `order` direction must be one of `asc`/`desc` in either case or
+/// it raises. The column KEY of an order hash is quoted by Rails, so a
+/// key that is not a column name can never be SQL there either.
+///
+/// Each payload below is valid SQLite, so before the guards it ran: a
+/// subquery executed inside LIMIT, OFFSET and ORDER BY.
+fn query_value_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#)
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write("config/routes.rb", r#"Rails.application.routes.draw do
+  get "/limited", to: "widgets#limited"
+  get "/paged", to: "widgets#paged"
+  get "/sorted", to: "widgets#sorted"
+  get "/sorted_by", to: "widgets#sorted_by"
+end
+"#)
+        .write("app/controllers/widgets_controller.rb", r#"class WidgetsController < ApplicationController
+  def limited
+    render plain: Widget.order(:name).limit(params[:n]).map { |w| w.name }.join(",")
+  end
+
+  def paged
+    render plain: Widget.order(:name).offset(params[:skip]).map { |w| w.name }.join(",")
+  end
+
+  def sorted
+    render plain: Widget.order(name: params[:dir]).map { |w| w.name }.join(",")
+  end
+
+  def sorted_by
+    render plain: Widget.order(params[:sort] => :asc).map { |w| w.name }.join(",")
+  end
+end
+"#)
+}
+
+fn query_value_assertions() -> &'static str {
+    r#"
+require_relative "app/controllers/widgets_controller"
+Widget.create!(name: "beta")
+Widget.create!(name: "alpha")
+Widget.create!(name: "gamma")
+
+def run(action, params)
+  controller = WidgetsController.new
+  controller.params = params
+  controller.process_action(action)
+  controller.body
+end
+
+# The ArgumentError Rails raises, or the rows the payload produced.
+def rejected(action, params)
+  "ran: " + run(action, params)
+rescue ArgumentError
+  "rejected"
+end
+
+got = run(:limited, { "n" => "2" })
+raise "a numeric String limit is Rails' Integer(): #{got}" unless got == "alpha,beta"
+got = rejected(:limited, { "n" => "(SELECT COUNT(*) FROM widgets)" })
+raise "LIMIT took SQL: #{got}" unless got == "rejected"
+
+got = run(:paged, { "skip" => "1" })
+raise "a numeric String offset is Rails' to_i: #{got}" unless got == "beta,gamma"
+got = run(:paged, { "skip" => "(SELECT 2)" })
+raise "OFFSET took SQL: #{got}" unless got == "alpha,beta,gamma"
+
+got = run(:sorted, { "dir" => "desc" })
+raise "a String direction: #{got}" unless got == "gamma,beta,alpha"
+got = rejected(:sorted, { "dir" => "asc, (SELECT 1)" })
+raise "ORDER direction took SQL: #{got}" unless got == "rejected"
+
+got = run(:sorted_by, { "sort" => "name" })
+raise "a String column key: #{got}" unless got == "alpha,beta,gamma"
+got = rejected(:sorted_by, { "sort" => "(SELECT 1)" })
+raise "ORDER column took SQL: #{got}" unless got == "rejected"
+
+puts "query values passed"
+"#
+}
+
+#[test]
+fn query_params_are_values_not_sql() {
+    query_value_app()
+        .run_ruby(query_value_assertions())
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn query_params_are_values_not_sql_on_spinel() {
+    let script = format!(
+        "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{}",
+        query_value_assertions()
+    );
+    query_value_app().run_spinel(&script).assert_passes();
+}

@@ -364,15 +364,21 @@ module ActiveRecord
       a <=> b
     end
 
+    # The value is a request param as often as a literal
+    # (`limit(params[:per_page])`), and it is spliced into the SQL, so
+    # both pass through Rails' own casts here: `limit` is
+    # `sanitize_limit` (`Integer()`, which raises on anything that is
+    # not an integer) and `offset` is `build_arel`'s `to_i`. nil clears
+    # either, as in Rails.
     def limit(n)
       @records = nil
-      @limit = n
+      @limit = n.nil? ? nil : sql_limit(n)
       self
     end
 
     def offset(n)
       @records = nil
-      @offset = n
+      @offset = n.nil? ? nil : n.to_i
       self
     end
 
@@ -1052,7 +1058,7 @@ module ActiveRecord
     # counted carries the page size into the count.
     def first_n(n)
       prior = @limit
-      @limit = n
+      @limit = sql_limit(n)
       rows = to_a
       @limit = prior
       @records = nil
@@ -1091,7 +1097,7 @@ module ActiveRecord
         end
         @orders = reversed
       end
-      @limit = n
+      @limit = sql_limit(n)
       rows = to_a
       @limit = prior_limit
       @orders = prior_orders
@@ -1765,11 +1771,51 @@ module ActiveRecord
       out.join(", ")
     end
 
+    # Rails' `sanitize_limit`: `Integer(n)`. An integer, or a String
+    # spelling one (surrounding space allowed), is that integer; a Float
+    # truncates; anything else is the ArgumentError `Integer()` raises —
+    # never text in the LIMIT clause.
+    def sql_limit(n)
+      return n.to_i if n.is_a?(Float)
+      text = n.to_s.strip
+      unless text.match?(/\A[+-]?\d+\z/)
+        raise ArgumentError, "invalid value for Integer(): \"" + n.to_s + "\""
+      end
+      text.to_i
+    end
+
+    # An `order` hash's direction: Rails' `VALID_DIRECTIONS`, else the
+    # ArgumentError `validate_order_args` raises.
+    def order_direction(dir)
+      d = dir.to_s
+      return d.upcase if d == "asc" || d == "desc" || d == "ASC" || d == "DESC"
+      raise ArgumentError, "Direction \"" + d + "\" is invalid. Valid directions are: " \
+        "[:asc, :desc, :ASC, :DESC, \"asc\", \"desc\", \"ASC\", \"DESC\"]"
+    end
+
+    # An `order` hash's KEY. Rails quotes it as a column of the table
+    # (`"widgets"."name"`), so it is a name and never SQL; this runtime
+    # writes identifiers bare, so it admits only what is a name —
+    # `col` or `table.col` — and raises on the rest. MEASURED against
+    # activerecord 8.1 on SQLite, two divergences: a SQL-looking key
+    # raises `UnknownAttributeReference` there, not ArgumentError, and an
+    # unknown-but-well-formed key (`"nope"`) SUCCEEDS there — SQLite reads
+    # a double-quoted identifier that names no column as a string
+    # literal, so the rows come back ordered by a constant — where the
+    # bare name here is SQLite's "no such column" error.
+    def order_hash_column(col)
+      c = col.to_s
+      unless c.match?(/\A[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?\z/)
+        raise ArgumentError, "Order column \"" + c + "\" is not a column name"
+      end
+      c
+    end
+
     # `order(:col)` / `order("col DESC")` / `order(col: :desc)`.
     def order_term(p)
       if p.is_a?(Hash)
         parts = []
-        p.each { |col, dir| parts << "#{col} #{dir.to_s.upcase}" }
+        p.each { |col, dir| parts << "#{order_hash_column(col)} #{order_direction(dir)}" }
         parts.join(", ")
       else
         p.to_s

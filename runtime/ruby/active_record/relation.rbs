@@ -216,5 +216,8 @@ module ActiveRecord
     def named_bind_char?: (String ch) -> bool
     def escape_list: (Array[untyped] vals) -> String
     def order_term: (untyped p) -> String
+    def sql_limit: (Integer n) -> Integer
+    def order_direction: (Symbol | String dir) -> String
+    def order_hash_column: (Symbol | String col) -> String
   end
 end
