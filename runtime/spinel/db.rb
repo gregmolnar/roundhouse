@@ -1801,11 +1801,29 @@ module Db
     SQL.sqlite3_changes(current_conn.dbh)
   end
 
-  # Same SQL-value escaping shape as the gem-backed sibling. Single-
-  # quote doubling matches sqlite's literal-string syntax; non-string
-  # input goes through `to_s` first (Ruby semantics).
+  # Same SQL-value escaping shape as the gem-backed siblings (db_cruby.rb
+  # and db_jruby.rb carry this arm verbatim). Single-quote doubling matches
+  # sqlite's literal-string syntax; non-string input goes through `to_s`
+  # first (Ruby semantics).
+  #
+  # BYTES go out as a hex BLOB literal, `X'…'`. A NUL cannot ride a
+  # quoted literal on THIS shim for a sharper reason than the gem's: the
+  # statement reaches sqlite through `sqlite3_prepare_v2(dbh, sql, -1, …)`
+  # (see prepare_cached), so it is a C string and ends at the first NUL.
+  # An escaped value carrying one truncates the statement mid-literal,
+  # the prepare fails, and a request whose parameter carried %00 answers
+  # 500 — where the gem-backed lanes answer the same request, their blob
+  # literal comparing TEXT-vs-BLOB and matching nothing. The BINARY arm is
+  # the siblings' other case: a binary value stored as TEXT sorts before
+  # every BLOB, so a `t.binary` column filled half one way and half the
+  # other orders wrong (lobsters' `confidence_order` is the corpus case).
+  # An ASCII-only BINARY string stays text, as it always was.
   def self.escape_string(s)
-    "'" + s.to_s.gsub("'", "''") + "'"
+    str = s.to_s
+    if str.include?("\0") || (str.encoding == Encoding::BINARY && !str.ascii_only?)
+      return "X'" + str.unpack1("H*") + "'"
+    end
+    "'" + str.gsub("'", "''") + "'"
   end
 
   def self.escape_int(n)

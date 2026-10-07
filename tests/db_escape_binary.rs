@@ -8,10 +8,19 @@
 //! both. Bytes = any NUL, or a BINARY-encoded string that is not plain
 //! ASCII. An ASCII-only BINARY string stays text, as it always was.
 //!
-//! Both ruby-family SQL-literal shims carry the rule (the gem-backed
-//! one and the JDBC one). The method is evaluated alone, because loading
-//! the whole shim requires the sqlite3 gem, which the unit job does not
-//! install.
+//! All three ruby-family SQL-literal shims carry the rule: the gem-backed
+//! one, the JDBC one, and the spinel FFI one (`runtime/spinel/db.rb`).
+//! The method is evaluated alone, because loading the whole shim needs
+//! either the sqlite3 gem (the gem-backed shim) or spinel's `ffi_func`
+//! declarations (the FFI shim), neither of which the unit job provides.
+//!
+//! The FFI shim's stake is the sharper one: it calls
+//! `sqlite3_prepare_v2(dbh, sql, -1, …)`, so the statement is a C string
+//! and a NUL inside an escaped literal ends it mid-literal — the prepare
+//! fails and a request whose parameter carried %00 answers 500, where
+//! the gem-backed lanes answer the same request (their hex BLOB literal
+//! compares TEXT-vs-BLOB and matches nothing). The contract test pins
+//! the shared answer, so the lanes cannot drift apart again.
 
 use std::process::Command;
 
@@ -58,4 +67,9 @@ fn the_cruby_shim_writes_bytes_as_a_blob_literal() {
 #[test]
 fn the_jruby_shim_writes_bytes_as_a_blob_literal() {
     check("runtime/spinel/db_jruby.rb");
+}
+
+#[test]
+fn the_spinel_ffi_shim_writes_bytes_as_a_blob_literal() {
+    check("runtime/spinel/db.rb");
 }
